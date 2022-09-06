@@ -1,4 +1,4 @@
-import {useEffect, useRef, useCallback} from 'react';
+import {useEffect, useRef, useCallback, useState} from 'react';
 import freeice from 'freeice';
 import useStateWithCallback from './useStateWithCallback';
 import socket from '../socket';
@@ -7,17 +7,38 @@ import ACTIONS from '../socket/actions';
 export const LOCAL_VIDEO = 'LOCAL_VIDEO';
 
 
-export default function useWebRTC(roomID) {
+export default function useWebRTC(roomID, userId) {
   const [clients, updateClients] = useStateWithCallback([]);
 
-  const addNewClient = useCallback((newClient, cb) => {
-    updateClients(list => {
-      if (!list.includes(newClient)) {
-        return [...list, newClient]
-      }
+  const [selfVideoStatus, setSelfVideoStatus] = useState(true);
+  const [selfMicStatus, setSelfMicStatus] = useState(true);
+  const [screenShareStatus, setScreenShareStatus] = useState(false);
 
-      return list;
+  const addNewClient = useCallback((newClient, cb) => {
+    updateClients((list) => {
+        const connectedClientIds = [];
+        for (let i = 0; i < list.length; i++) {
+            connectedClientIds.push(list[i].clientId);
+        }
+        if (!connectedClientIds.includes(newClient.clientId)) {
+            return [...list, newClient]
+        }
+        return list;
     }, cb);
+  }, [clients, updateClients]);
+
+  const updateClient = useCallback(({userId, audioStatus, videoStatus}) => {
+      updateClients((list) => {
+          const updatedClient = list.find(k => k.userId === userId);
+          if (updatedClient) {
+              audioStatus !== undefined && (updatedClient.audioStatus = audioStatus);
+              videoStatus !== undefined && (updatedClient.videoStatus = videoStatus);
+              return [
+                  ...list.filter(k => k.userId !== userId), updatedClient
+              ];
+          }
+          return list;
+      }, () => console.log('Updated: ', userId));
   }, [clients, updateClients]);
 
   const peerConnections = useRef({});
@@ -27,7 +48,7 @@ export default function useWebRTC(roomID) {
   });
 
   useEffect(() => {
-    async function handleNewPeer({peerID, createOffer}) {
+    async function handleNewPeer({peerID, userId, createOffer}) {
       if (peerID in peerConnections.current) {
         return console.warn(`Already connected to peer ${peerID}`);
       }
@@ -51,7 +72,12 @@ export default function useWebRTC(roomID) {
 
         if (tracksNumber === 2) { // video & audio tracks received
           tracksNumber = 0;
-          addNewClient(peerID, () => {
+          addNewClient({
+            clientId: peerID,
+            userId,
+            videoStatus: true,
+            audioStatus: true
+          }, () => {
             if (peerMediaElements.current[peerID]) {
               peerMediaElements.current[peerID].srcObject = remoteStream;
             } else {
@@ -152,6 +178,28 @@ export default function useWebRTC(roomID) {
   }, []);
 
   useEffect(() => {
+    socket.on(ACTIONS.UPDATE_USER_MEDIA, ({type, currentMediaStatus, userId}) => {
+        if (currentMediaStatus !== null || currentMediaStatus !== []) {
+            switch (type) {
+                case 'video':
+                    updateClient({userId, videoStatus: currentMediaStatus});
+                    break;
+                case 'mic':
+                    updateClient({userId, audioStatus: currentMediaStatus});
+                    break;
+                default:
+                    updateClient({
+                        userId,
+                        audioStatus: currentMediaStatus[0],
+                        videoStatus: currentMediaStatus[1]
+                    });
+                    break;
+            }
+        }
+    });
+  }, [clients]);
+
+  useEffect(() => {
     async function startCapture() {
       localMediaStream.current = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -160,8 +208,12 @@ export default function useWebRTC(roomID) {
           height: 720,
         }
       });
-
-      addNewClient(LOCAL_VIDEO, () => {
+      addNewClient({
+        clientId: LOCAL_VIDEO,
+        userId,
+        videoStatus: true,
+        audioStatus: true
+      }, () => {
         const localVideoElement = peerMediaElements.current[LOCAL_VIDEO];
 
         if (localVideoElement) {
@@ -172,7 +224,8 @@ export default function useWebRTC(roomID) {
     }
 
     startCapture()
-      .then(() => socket.emit(ACTIONS.JOIN, {room: roomID}))
+      // .then(() => socket.emit(ACTIONS.JOIN, {room: roomID}))
+      .then(() => socket.emit(ACTIONS.JOIN, {room: roomID, userId}))
       .catch(e => console.error('Error getting userMedia:', e));
 
     return () => {
@@ -186,8 +239,46 @@ export default function useWebRTC(roomID) {
     peerMediaElements.current[id] = node;
   }, []);
 
+  const updateVideo = () => {
+    setSelfVideoStatus((currentStatus) => {
+        socket.emit(ACTIONS.UPDATE_MY_MEDIA, {
+            type: 'video',
+            currentMediaStatus: !currentStatus,
+            userId
+        });
+        localMediaStream.current.getVideoTracks()[0].enabled = !currentStatus;
+        return !currentStatus;
+    });
+  };
+
+  const updateMic = () => {
+      setSelfMicStatus((currentStatus) => {
+          socket.emit(ACTIONS.UPDATE_MY_MEDIA, {
+              type: 'mic',
+              currentMediaStatus: !currentStatus,
+              userId
+          });
+          localMediaStream.current.getAudioTracks()[0].enabled = !currentStatus;
+          return !currentStatus;
+      });
+  };
+
+  const screenShare = async () => {
+    console.log('SHARE SCREEN');
+    const currentStream = await navigator.mediaDevices.getDisplayMedia({video: true});
+    const localVideoElement = peerMediaElements.current[LOCAL_VIDEO];
+    localVideoElement.srcObject = currentStream;
+    setScreenShareStatus(true);
+  };
+
   return {
     clients,
-    provideMediaRef
+    provideMediaRef,
+    selfMicStatus,
+    selfVideoStatus,
+    screenShareStatus, 
+    updateVideo,
+    updateMic,
+    screenShare
   };
 }

@@ -20,11 +20,14 @@ function shareRoomsInfo() {
   })
 }
 
+// DB mock
+const participants = [];
+
 io.on('connection', socket => {
   shareRoomsInfo();
 
   socket.on(ACTIONS.JOIN, config => {
-    const {room: roomID} = config;
+    const {room: roomID, userId} = config;
     const {rooms: joinedRooms} = socket;
 
     if (Array.from(joinedRooms).includes(roomID)) {
@@ -36,16 +39,33 @@ io.on('connection', socket => {
     clients.forEach(clientID => {
       io.to(clientID).emit(ACTIONS.ADD_PEER, {
         peerID: socket.id,
+        userId,
         createOffer: false
       });
-
+    
+      const p = participants && participants.find(k => k.clientId === clientID);
       socket.emit(ACTIONS.ADD_PEER, {
         peerID: clientID,
+        userId: p.userId,
         createOffer: true,
       });
     });
 
     socket.join(roomID);
+
+    // MOCK DB INSERT
+    const clientsUpdated = Array.from(io.sockets.adapter.rooms.get(roomID) || []);
+    clientsUpdated.forEach(c => {
+      if (participants.indexOf(c) === -1) {
+        participants.push({
+          userId,
+          clientId: c
+        });
+      }
+    });
+
+    console.log('participants: ', participants);
+
     shareRoomsInfo();
   });
 
@@ -91,6 +111,10 @@ io.on('connection', socket => {
       peerID: socket.id,
       iceCandidate,
     });
+  });
+
+  socket.on(ACTIONS.UPDATE_MY_MEDIA, ({type, currentMediaStatus, userId}) => {
+    socket.broadcast.emit(ACTIONS.UPDATE_USER_MEDIA, {type, currentMediaStatus, userId});
   });
 
 });
